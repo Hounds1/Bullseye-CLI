@@ -1,0 +1,35 @@
+plugins {
+    id 'application'
+}
+
+group = 'io.bullseye'
+version = '0.1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+application {
+    mainClass = 'io.bullseye.cli.BullseyeCli'
+    applicationName = 'bullseye'
+}
+
+distributions {
+    main {
+        distributionBaseName = 'bullseye-cli'
+    }
+}
+
+def releaseVersion = version.toString()
+tasks.named('processResources') {
+    inputs.property('releaseVersion', releaseVersion)
+    filesMatching('io/bullseye/cli/version.txt') {
+        expand(releaseVersion: releaseVersion)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
