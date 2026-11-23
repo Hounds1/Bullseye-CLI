@@ -5,3 +5,8 @@ build/
 .vscode/
 out/
 .DS_Store
+/bullseye-enrollment/
+/.*.pending/
+*.invite
+*.p12
+tls.jvm

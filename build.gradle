@@ -5,6 +5,18 @@ plugins {
 group = 'io.bullseye'
 version = '0.1.0-SNAPSHOT'
 
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.2'
+    implementation 'org.bouncycastle:bcpkix-jdk18on:1.87'
+    testImplementation platform('org.junit:junit-bom:6.0.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(25)
@@ -32,4 +44,8 @@ tasks.named('processResources') {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
 }

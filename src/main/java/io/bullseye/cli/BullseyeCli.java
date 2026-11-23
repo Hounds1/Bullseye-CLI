@@ -1,9 +1,12 @@
 package io.bullseye.cli;
 
+import io.bullseye.cli.enrollment.EnrollCommand;
+
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 public final class BullseyeCli {
     private static final String USAGE = "Usage: bullseye [--help | --version]";
@@ -18,6 +21,9 @@ public final class BullseyeCli {
     }
 
     private static int run(String[] arguments, PrintStream out, PrintStream err) {
+        if (arguments.length > 0 && "enroll".equals(arguments[0])) {
+            return EnrollCommand.run(Arrays.copyOfRange(arguments, 1, arguments.length), out, err);
+        }
         if (arguments.length == 0) {
             printHelp(out);
             return 0;
@@ -42,6 +48,7 @@ public final class BullseyeCli {
     private static void printHelp(PrintStream out) {
         out.println("Bullseye CLI");
         out.println(USAGE);
+        out.println("       bullseye enroll --invite <file> [--output <directory>] [--core-config <file>]");
     }
 
     private static String version() {
