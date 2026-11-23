@@ -37,6 +37,8 @@ final class EnrollmentBundle {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_LOCAL_JSON_BYTES = 32_768;
+    private static final int PENDING_SCHEMA_VERSION = 2;
+    private static final int BUNDLE_SCHEMA_VERSION = 1;
     private static final List<String> BUNDLE_FILES =
             List.of("identity.p12", "trust.p12", "bullseye.properties", "tls.jvm", "enrollment.json");
 
@@ -46,12 +48,52 @@ final class EnrollmentBundle {
                 throws IOException, InterruptedException;
     }
 
-    private record Pending(UUID requestId, EnrollmentIdentity identity) {}
+    private record Pending(String nodeId, UUID requestId, EnrollmentIdentity identity, String inviteDigest) {}
 
     private EnrollmentBundle() {}
 
+    static String prepare(Path output, String nodeId) throws IOException {
+        Path pendingDirectory = reserveDirectory(output);
+        try (FileChannel channel = openLock(pendingDirectory); FileLock ignored = acquireLock(channel)) {
+            if (Files.exists(output, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Output already exists. Choose a new directory to prepare another enrollment.");
+            }
+
+            Path requestFile = pendingDirectory.resolve("request.json");
+            Pending request;
+            if (Files.exists(requestFile, LinkOption.NOFOLLOW_LINKS)) {
+                request = readRequest(requestFile);
+                if (!nodeId.equals(request.nodeId())) {
+                    throw new IOException("A different Core node ID is already prepared for this output.");
+                }
+            } else {
+                request = new Pending(nodeId, UUID.randomUUID(), EnrollmentIdentity.generate(nodeId), null);
+                saveRequest(requestFile, request);
+            }
+            return publicKeySha256(request.identity());
+        }
+    }
+
     static void install(Path output, Invitation invite, String baseConfig, RedeemOperation operation)
             throws IOException, InterruptedException {
+        Path pendingDirectory = reserveDirectory(output);
+        String inviteKey = inviteDigest(invite);
+        try (FileChannel channel = openLock(pendingDirectory); FileLock ignored = acquireLock(channel)) {
+            Path requestFile = pendingDirectory.resolve("request.json");
+            if (Files.exists(output, LinkOption.NOFOLLOW_LINKS)) {
+                requireExistingBundle(output, inviteKey);
+                clearCompletedRequest(requestFile, inviteKey);
+                return;
+            }
+
+            Pending request = bindInvitation(requestFile, invite, inviteKey);
+            Registration registration = operation.redeem(invite, request.requestId(), request.identity().csrPem());
+            writeBundle(output, request.identity(), registration, baseConfig, inviteKey);
+            clearCompletedRequest(requestFile, inviteKey);
+        }
+    }
+
+    private static Path reserveDirectory(Path output) throws IOException {
         Path parent = output.getParent();
         if (parent == null || output.toString().indexOf('\n') >= 0 || output.toString().indexOf('\r') >= 0) {
             throw new IOException("Choose an output directory with a valid single-line path.");
@@ -60,23 +102,12 @@ final class EnrollmentBundle {
         Path pendingDirectory = parent.resolve("." + output.getFileName() + ".pending");
         preparePrivateDirectory(pendingDirectory);
         forceDirectory(parent);
-        String inviteKey = inviteDigest(invite);
+        return pendingDirectory;
+    }
 
-        try (FileChannel channel = FileChannel.open(pendingDirectory.resolve("lock"),
+    private static FileChannel openLock(Path pendingDirectory) throws IOException {
+        return FileChannel.open(pendingDirectory.resolve("lock"),
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-                FileLock ignored = acquireLock(channel)) {
-            Path requestFile = pendingDirectory.resolve("request.json");
-            if (Files.exists(output, LinkOption.NOFOLLOW_LINKS)) {
-                requireExistingBundle(output, inviteKey);
-                clearCompletedRequest(requestFile, inviteKey);
-                return;
-            }
-
-            Pending request = resumeOrCreate(requestFile, invite, inviteKey);
-            Registration registration = operation.redeem(invite, request.requestId(), request.identity().csrPem());
-            writeBundle(output, request.identity(), registration, baseConfig, inviteKey);
-            clearCompletedRequest(requestFile, inviteKey);
-        }
     }
 
     private static FileLock acquireLock(FileChannel channel) throws IOException {
@@ -115,33 +146,53 @@ final class EnrollmentBundle {
         return Files.getFileAttributeView(path, PosixFileAttributeView.class) != null;
     }
 
-    private static Pending resumeOrCreate(Path file, Invitation invite, String inviteKey) throws IOException {
-        if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
-            JsonNode saved = readLocalJson(file);
-            if (!inviteKey.equals(saved.path("inviteDigest").textValue())) {
-                throw new IOException("A different invitation already has a pending request for this output.");
-            }
-            try {
-                UUID requestId = UUID.fromString(requiredText(saved, "requestId"));
-                byte[] privateKey = Base64.getDecoder().decode(requiredText(saved, "privateKey"));
-                try {
-                    byte[] publicKey = Base64.getDecoder().decode(requiredText(saved, "publicKey"));
-                    return new Pending(requestId, EnrollmentIdentity.restore(
-                            privateKey, publicKey, requiredText(saved, "csrPem")));
-                } finally {
-                    Arrays.fill(privateKey, (byte) 0);
-                }
-            } catch (IllegalArgumentException invalid) {
-                throw new IOException("Invalid enrollment resume data.");
-            }
+    private static Pending bindInvitation(Path file, Invitation invite, String inviteKey) throws IOException {
+        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("No prepared Core key for this output. Run bullseye enroll prepare first.");
         }
+        Pending request = readRequest(file);
+        if (!invite.nodeId().equals(request.nodeId())
+                || !invite.publicKeySha256().equals(publicKeySha256(request.identity()))) {
+            throw new IOException("Invitation node ID or public key SHA-256 does not match the prepared Core key.");
+        }
+        if (request.inviteDigest() == null) {
+            request = new Pending(request.nodeId(), request.requestId(), request.identity(), inviteKey);
+            saveRequest(file, request);
+        } else if (!inviteKey.equals(request.inviteDigest())) {
+            throw new IOException("A different invitation already has a pending request for this output.");
+        }
+        return request;
+    }
 
-        var request = new Pending(UUID.randomUUID(), EnrollmentIdentity.generate(invite.nodeId()));
+    private static Pending readRequest(Path file) throws IOException {
+        JsonNode saved = readLocalJson(file, PENDING_SCHEMA_VERSION);
+        try {
+            String nodeId = requiredText(saved, "nodeId");
+            if (!EnrollmentClient.validNodeId(nodeId)) {
+                throw new IllegalArgumentException("Invalid prepared node ID");
+            }
+            UUID requestId = UUID.fromString(requiredText(saved, "requestId"));
+            byte[] privateKey = Base64.getDecoder().decode(requiredText(saved, "privateKey"));
+            try {
+                byte[] publicKey = Base64.getDecoder().decode(requiredText(saved, "publicKey"));
+                String digest = saved.path("inviteDigest").textValue();
+                var identity = EnrollmentIdentity.restore(privateKey, publicKey, requiredText(saved, "csrPem"));
+                return new Pending(nodeId, requestId, identity, digest);
+            } finally {
+                Arrays.fill(privateKey, (byte) 0);
+            }
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid enrollment resume data.");
+        }
+    }
+
+    private static void saveRequest(Path file, Pending request) throws IOException {
         var encoder = Base64.getEncoder();
         byte[] privateKey = request.identity().privateKey().getEncoded();
         try {
-            var saved = JSON.createObjectNode().put("schemaVersion", 1)
-                    .put("inviteDigest", inviteKey)
+            var saved = JSON.createObjectNode().put("schemaVersion", PENDING_SCHEMA_VERSION)
+                    .put("nodeId", request.nodeId())
+                    .put("inviteDigest", request.inviteDigest())
                     .put("requestId", request.requestId().toString())
                     .put("privateKey", encoder.encodeToString(privateKey))
                     .put("publicKey", encoder.encodeToString(request.identity().publicKey().getEncoded()))
@@ -150,7 +201,6 @@ final class EnrollmentBundle {
         } finally {
             Arrays.fill(privateKey, (byte) 0);
         }
-        return request;
     }
 
     private static void saveRequest(Path file, byte[] contents) throws IOException {
@@ -163,7 +213,7 @@ final class EnrollmentBundle {
                 }
                 channel.force(true);
             }
-            Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE);
+            Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             forceDirectory(file.getParent());
         } finally {
             Arrays.fill(contents, (byte) 0);
@@ -171,7 +221,7 @@ final class EnrollmentBundle {
         }
     }
 
-    private static JsonNode readLocalJson(Path file) throws IOException {
+    private static JsonNode readLocalJson(Path file, int schemaVersion) throws IOException {
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Enrollment state must be a regular file.");
         }
@@ -182,7 +232,7 @@ final class EnrollmentBundle {
                     JsonNode value = JSON.readTree(bytes);
                     if (value != null && value.isObject() && value.path("schemaVersion").isIntegralNumber()
                             && value.path("schemaVersion").canConvertToInt()
-                            && value.path("schemaVersion").intValue() == 1) {
+                            && value.path("schemaVersion").intValue() == schemaVersion) {
                         return value;
                     }
                 }
@@ -207,7 +257,8 @@ final class EnrollmentBundle {
         if (!Files.isDirectory(output, LinkOption.NOFOLLOW_LINKS)
                 || BUNDLE_FILES.stream().anyMatch(
                         file -> !Files.isRegularFile(output.resolve(file), LinkOption.NOFOLLOW_LINKS))
-                || !inviteKey.equals(readLocalJson(output.resolve("enrollment.json")).path("inviteDigest").textValue())) {
+                || !inviteKey.equals(readLocalJson(output.resolve("enrollment.json"), BUNDLE_SCHEMA_VERSION)
+                        .path("inviteDigest").textValue())) {
             throw new IOException("Output already exists. Choose a new directory for a different enrollment.");
         }
     }
@@ -217,7 +268,7 @@ final class EnrollmentBundle {
             return;
         }
         try {
-            if (!inviteKey.equals(readLocalJson(file).path("inviteDigest").textValue())) {
+            if (!inviteKey.equals(readLocalJson(file, PENDING_SCHEMA_VERSION).path("inviteDigest").textValue())) {
                 throw new IOException("Pending request belongs to a different invitation.");
             }
             Files.delete(file);
@@ -247,7 +298,7 @@ final class EnrollmentBundle {
             }
             Files.writeString(staging.resolve("bullseye.properties"), properties(baseConfig, registration));
             Files.write(staging.resolve("enrollment.json"), JSON.writeValueAsBytes(
-                    JSON.createObjectNode().put("schemaVersion", 1)
+                    JSON.createObjectNode().put("schemaVersion", BUNDLE_SCHEMA_VERSION)
                             .put("nodeId", registration.nodeId()).put("inviteDigest", inviteKey)));
             for (String name : BUNDLE_FILES) {
                 Path file = staging.resolve(name);
@@ -312,10 +363,18 @@ final class EnrollmentBundle {
 
     private static String inviteDigest(Invitation invite) {
         String key = String.join("\0", invite.nodeId(), invite.enrollmentUrl().toASCIIString(),
-                invite.serverCaPem(), invite.expiresAt().toString(), invite.code());
+                invite.serverCaPem(), invite.expiresAt().toString(), invite.code(), invite.publicKeySha256());
+        return sha256(key.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String publicKeySha256(EnrollmentIdentity identity) {
+        return sha256(identity.publicKey().getEncoded());
+    }
+
+    private static String sha256(byte[] bytes) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(key.getBytes(StandardCharsets.UTF_8)));
+                    .digest(bytes));
         } catch (NoSuchAlgorithmException unavailable) {
             throw new IllegalStateException("SHA-256 is unavailable", unavailable);
         }

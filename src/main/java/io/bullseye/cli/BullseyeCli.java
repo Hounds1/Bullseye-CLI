@@ -48,6 +48,7 @@ public final class BullseyeCli {
     private static void printHelp(PrintStream out) {
         out.println("Bullseye CLI");
         out.println(USAGE);
+        out.println("       bullseye enroll prepare --node-id <id> [--output <directory>]");
         out.println("       bullseye enroll --invite <file> [--output <directory>] [--core-config <file>]");
     }
 

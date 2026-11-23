@@ -18,8 +18,17 @@ The distribution ZIP is under `build/distributions`.
 
 ## Core node enrollment
 
-Transfer the invitation issued by your UOG operator to the Core host over a
-trusted channel. Run the enrollment command on that host.
+Prepare the enrollment key on the Core host.
+
+```sh
+./build/install/bullseye-cli/bin/bullseye enroll prepare \
+  --node-id edge-01 --output bullseye-enrollment
+```
+
+Give the printed node ID and public key SHA-256 fingerprint to the UOG
+operator through a trusted channel. The operator issues an invitation for
+that exact pair. Transfer the invitation to the Core host over a trusted
+channel and redeem it using the same output directory.
 
 ```sh
 ./build/install/bullseye-cli/bin/bullseye enroll \
@@ -41,11 +50,13 @@ BULLSEYE_CORE_OPTS="\"@$PWD/bullseye-enrollment/tls.jvm\"" \
 ```
 
 Core logs `Cluster connection authorized.` after CCC accepts the connection.
-Enrollment uses the [UOG enrollment API v1][enrollment-v1].
+Enrollment uses the [UOG enrollment API v2][enrollment-v2]. Previously issued
+v1 invitations need to be reissued for a prepared key. Already installed Core
+identities continue to connect using their existing configuration.
 
 If enrollment is interrupted, rerun the same command with the same invitation
 and output. The local resume directory preserves the original key and request
 for retry. A completed bundle for the same invitation is reused, including its
 identity. Choose a fresh output directory for a different invitation.
 
-[enrollment-v1]: https://github.com/Hounds1/Bullseye-UOG/blob/main/bullseye-ccc/ENROLLMENT-V1.md
+[enrollment-v2]: https://github.com/Hounds1/Bullseye-UOG/blob/main/bullseye-ccc/ENROLLMENT-V2.md

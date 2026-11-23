@@ -25,7 +25,8 @@ class EnrollmentBundleTest {
     void retriesTheSameRequestAndCsrWithoutSavingTheInvitationCode() throws Exception {
         Path output = directory.resolve("enrolled");
         Path pending = directory.resolve(".enrolled.pending/request.json");
-        Invitation invite = invite("A");
+        String fingerprint = EnrollmentBundle.prepare(output, "edge-01");
+        Invitation invite = invite("A", fingerprint);
         var requestId = new AtomicReference<UUID>();
         var csr = new AtomicReference<String>();
 
@@ -50,10 +51,33 @@ class EnrollmentBundleTest {
         assertFalse(Files.exists(output));
 
         IOException different = assertThrows(IOException.class, () -> EnrollmentBundle.install(
-                output, invite("B"), "", (sentInvite, sentId, sentCsr) -> {
+                output, invite("B", fingerprint), "", (sentInvite, sentId, sentCsr) -> {
                     throw new AssertionError("A different invite reached the API");
                 }));
         assertTrue(different.getMessage().contains("different invitation"));
+    }
+
+    @Test
+    void prepareReusesTheKeyAndRejectsAnInvitationBoundToAnotherKeyLocally() throws Exception {
+        Path output = directory.resolve("enrolled");
+        String fingerprint = EnrollmentBundle.prepare(output, "edge-01");
+        String otherFingerprint = EnrollmentBundle.prepare(directory.resolve("other"), "edge-01");
+
+        assertTrue(fingerprint.matches("[a-f0-9]{64}"));
+        assertEquals(fingerprint, EnrollmentBundle.prepare(output, "edge-01"));
+        assertThrows(IOException.class, () -> EnrollmentBundle.prepare(output, "edge-02"));
+
+        IOException mismatch = assertThrows(IOException.class, () -> EnrollmentBundle.install(
+                output, invite("A", otherFingerprint), "", (sentInvite, sentId, sentCsr) -> {
+                    throw new AssertionError("An invitation for another key reached the API");
+                }));
+        assertTrue(mismatch.getMessage().contains("does not match"));
+
+        IOException sent = assertThrows(IOException.class, () -> EnrollmentBundle.install(
+                output, invite("A", fingerprint), "", (sentInvite, sentId, sentCsr) -> {
+                    throw new IOException("Request sent");
+                }));
+        assertEquals("Request sent", sent.getMessage());
     }
 
     @Test
@@ -61,7 +85,7 @@ class EnrollmentBundleTest {
         Path output = Files.createDirectory(directory.resolve("existing"));
         Path settings = Files.writeString(output.resolve("bullseye.properties"), "original settings\n");
 
-        assertThrows(IOException.class, () -> EnrollmentBundle.install(output, invite("A"), "",
+        assertThrows(IOException.class, () -> EnrollmentBundle.install(output, invite("A", "0".repeat(64)), "",
                 (invite, requestId, csr) -> {
                     throw new AssertionError("Enrollment reached the API for an occupied output path");
                 }));
@@ -69,8 +93,8 @@ class EnrollmentBundleTest {
         assertFalse(Files.exists(output.resolve("identity.p12")));
     }
 
-    private static Invitation invite(String character) {
-        return new Invitation("edge-01", URI.create("https://uog.example.org/api/enrollment/v1/redeem"),
-                "test bootstrap CA", Instant.parse("2030-01-01T00:00:00Z"), character.repeat(43));
+    private static Invitation invite(String character, String fingerprint) {
+        return new Invitation("edge-01", URI.create("https://uog.example.org/api/enrollment/v2/redeem"),
+                "test bootstrap CA", Instant.parse("2030-01-01T00:00:00Z"), character.repeat(43), fingerprint);
     }
 }
