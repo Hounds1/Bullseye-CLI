@@ -18,6 +18,34 @@ The distribution ZIP is under `build/distributions`.
 
 ## Core node enrollment
 
-Core node enrollment is planned around UOG's versioned enrollment API.
-The CLI will use an invitation issued by UOG and install the resulting
-credentials and connection settings on the Core host.
+Transfer the invitation issued by your UOG operator to the Core host over a
+trusted channel. Run the enrollment command on that host.
+
+```sh
+./build/install/bullseye-cli/bin/bullseye enroll \
+  --invite edge-01.invite --output bullseye-enrollment \
+  --core-config /etc/bullseye/bullseye.properties
+```
+
+The output directory defaults to `bullseye-enrollment`. The optional
+`--core-config` file supplies existing Core settings, including the local
+diagnostic and TCC options. The command creates a bundle with the merged
+`bullseye.properties`, PKCS#12 identity and trust stores, and a JVM argument
+file named `tls.jvm`.
+
+Run the Core launcher with the generated properties and JVM arguments.
+
+```sh
+BULLSEYE_CORE_OPTS="\"@$PWD/bullseye-enrollment/tls.jvm\"" \
+  /opt/bullseye-core/bin/bullseye-core "$PWD/bullseye-enrollment/bullseye.properties"
+```
+
+Core logs `Cluster connection authorized.` after CCC accepts the connection.
+Enrollment uses the [UOG enrollment API v1][enrollment-v1].
+
+If enrollment is interrupted, rerun the same command with the same invitation
+and output. The local resume directory preserves the original key and request
+for retry. A completed bundle for the same invitation is reused, including its
+identity. Choose a fresh output directory for a different invitation.
+
+[enrollment-v1]: https://github.com/Hounds1/Bullseye-UOG/blob/main/bullseye-ccc/ENROLLMENT-V1.md
