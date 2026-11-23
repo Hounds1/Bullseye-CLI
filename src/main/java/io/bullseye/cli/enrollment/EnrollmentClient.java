@@ -31,6 +31,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
@@ -41,17 +42,19 @@ import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 
 final class EnrollmentClient {
-    private static final String REDEEM_PATH = "/api/enrollment/v1/redeem";
+    private static final String REDEEM_PATH = "/api/enrollment/v2/redeem";
     private static final int MAX_INVITE_BYTES = 64 * 1_024;
     private static final int MAX_RESPONSE_BYTES = 128 * 1_024;
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Pattern NODE_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
     private static final Pattern INVITE_CODE = Pattern.compile("[A-Za-z0-9_-]{43}");
+    private static final Pattern KEY_SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
     private static final Pattern PEM_CERTIFICATE = Pattern.compile(
             "-----BEGIN CERTIFICATE-----[\\r\\n]+([A-Za-z0-9+/=\\r\\n]+)-----END CERTIFICATE-----");
     private static final Set<String> SERVER_ERROR_CODES = Set.of(
             "INVALID_NODE_ID", "NODE_ID_IN_USE", "INVALID_OR_EXPIRED_CODE", "REQUEST_CONFLICT",
-            "INVALID_CSR", "TEMPORARY_UNAVAILABLE", "INVALID_REQUEST", "BODY_TOO_LARGE",
+            "INVALID_CSR", "PUBLIC_KEY_MISMATCH", "INVALID_PUBLIC_KEY_SHA256",
+            "TEMPORARY_UNAVAILABLE", "INVALID_REQUEST", "BODY_TOO_LARGE",
             "METHOD_NOT_ALLOWED", "NOT_FOUND", "UNAUTHORIZED");
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
@@ -60,7 +63,8 @@ final class EnrollmentClient {
     private EnrollmentClient() {
     }
 
-    record Invitation(String nodeId, URI enrollmentUrl, String serverCaPem, Instant expiresAt, String code) {
+    record Invitation(String nodeId, URI enrollmentUrl, String serverCaPem, Instant expiresAt,
+                      String code, String publicKeySha256) {
     }
 
     record Registration(String nodeId, String certificateChainPem, String cccHost, int cccPort,
@@ -78,7 +82,7 @@ final class EnrollmentClient {
 
         JsonNode invite = readVersionedJson(bytes, "invitation");
         String nodeId = requiredText(invite, "nodeId");
-        if (!NODE_ID.matcher(nodeId).matches()) {
+        if (!validNodeId(nodeId)) {
             throw new IOException("Invalid invitation nodeId");
         }
 
@@ -86,6 +90,10 @@ final class EnrollmentClient {
         String code = requiredText(invite, "code");
         if (!INVITE_CODE.matcher(code).matches()) {
             throw new IOException("Invalid enrollment invitation code");
+        }
+        String publicKeySha256 = requiredText(invite, "publicKeySha256");
+        if (!KEY_SHA256.matcher(publicKeySha256).matches()) {
+            throw new IOException("Invalid enrollment invitation public key SHA-256");
         }
 
         Instant expiresAt;
@@ -97,7 +105,12 @@ final class EnrollmentClient {
 
         String serverCaPem = requiredText(invite, "serverCaPem");
         certificates(serverCaPem);
-        return new Invitation(nodeId, enrollmentUrl, serverCaPem, expiresAt, code);
+        return new Invitation(nodeId, enrollmentUrl, serverCaPem, expiresAt, code,
+                publicKeySha256.toLowerCase(Locale.ROOT));
+    }
+
+    static boolean validNodeId(String nodeId) {
+        return NODE_ID.matcher(nodeId).matches();
     }
 
     static Registration redeem(Invitation invite, UUID requestId, String csrPem)
@@ -250,8 +263,8 @@ final class EnrollmentClient {
         if (!version.isIntegralNumber()) {
             throw new IOException("Invalid enrollment " + source + " apiVersion");
         }
-        if (!version.canConvertToInt() || version.intValue() != 1) {
-            throw new IOException("Unsupported enrollment " + source + " apiVersion. Expected 1");
+        if (!version.canConvertToInt() || version.intValue() != 2) {
+            throw new IOException("Unsupported enrollment " + source + " apiVersion. Expected 2");
         }
         return json;
     }
@@ -285,7 +298,7 @@ final class EnrollmentClient {
         } catch (IllegalArgumentException ignored) {
             // The original URL is intentionally absent from error messages.
         }
-        throw new IOException("Enrollment URL must be an HTTPS v1 redemption URL");
+        throw new IOException("Enrollment URL must be an HTTPS v2 redemption URL");
     }
 
     private static void validateCccHost(String host) throws IOException {

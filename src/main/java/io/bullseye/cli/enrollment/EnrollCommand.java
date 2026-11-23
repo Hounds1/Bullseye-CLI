@@ -6,32 +6,56 @@ import java.io.StringReader;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 
 public final class EnrollCommand {
     private static final String USAGE =
             "Usage: bullseye enroll --invite <file> [--output <directory>] [--core-config <file>]";
+    private static final String PREPARE_USAGE =
+            "Usage: bullseye enroll prepare --node-id <id> [--output <directory>]";
 
     private EnrollCommand() {}
 
     public static int run(String[] arguments, PrintStream out, PrintStream err) {
-        if (arguments.length == 1 && ("--help".equals(arguments[0]) || "-h".equals(arguments[0]))) {
-            out.println(USAGE);
+        boolean prepare = arguments.length != 0 && "prepare".equals(arguments[0]);
+        String[] optionsArgs = prepare ? Arrays.copyOfRange(arguments, 1, arguments.length) : arguments;
+        String usage = prepare ? PREPARE_USAGE : USAGE;
+        if (optionsArgs.length == 1 && ("--help".equals(optionsArgs[0]) || "-h".equals(optionsArgs[0]))) {
+            if (!prepare) {
+                out.println(PREPARE_USAGE);
+            }
+            out.println(usage);
             out.println("Default output directory: bullseye-enrollment");
             return 0;
         }
 
-        var options = parseOptions(arguments);
-        if (options == null) {
-            err.println(USAGE);
+        var options = parseOptions(optionsArgs,
+                prepare ? Set.of("--node-id", "--output") : Set.of("--invite", "--output", "--core-config"));
+        if (options == null || !options.containsKey(prepare ? "--node-id" : "--invite")) {
+            err.println(usage);
             return 2;
         }
 
         try {
-            var invite = EnrollmentClient.readInvite(Path.of(options.get("--invite")));
             Path output = Path.of(options.getOrDefault("--output", "bullseye-enrollment"))
                     .toAbsolutePath().normalize();
+            if (prepare) {
+                String nodeId = options.get("--node-id");
+                if (!EnrollmentClient.validNodeId(nodeId)) {
+                    err.println("Invalid enrollment node ID.");
+                    return 2;
+                }
+                String fingerprint = EnrollmentBundle.prepare(output, nodeId);
+                out.println("Node ID: " + nodeId);
+                out.println("Public key SHA-256: " + fingerprint);
+                return 0;
+            }
+
+            var invite = EnrollmentClient.readInvite(Path.of(options.get("--invite")));
             String baseConfig = options.containsKey("--core-config")
                     ? loadCoreConfig(Path.of(options.get("--core-config"))) : "";
             EnrollmentBundle.install(output, invite, baseConfig, EnrollmentClient::redeem);
@@ -52,14 +76,14 @@ public final class EnrollCommand {
         }
     }
 
-    private static HashMap<String, String> parseOptions(String[] arguments) {
+    private static Map<String, String> parseOptions(String[] arguments, Set<String> allowed) {
         if (arguments.length % 2 != 0) {
             return null;
         }
         var options = new HashMap<String, String>();
         for (int index = 0; index < arguments.length; index += 2) {
             String option = arguments[index];
-            if (!"--invite".equals(option) && !"--output".equals(option) && !"--core-config".equals(option)) {
+            if (!allowed.contains(option)) {
                 return null;
             }
             String value = arguments[index + 1];
@@ -67,7 +91,7 @@ public final class EnrollCommand {
                 return null;
             }
         }
-        return options.containsKey("--invite") ? options : null;
+        return options;
     }
 
     private static String loadCoreConfig(Path file) throws IOException {
